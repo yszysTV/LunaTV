@@ -122,13 +122,13 @@ function PlayPageClient() {
     blockAdEnabledRef.current = blockAdEnabled;
   }, [blockAdEnabled]);
 
-  // 外部弹幕开关（从 localStorage 继承，默认 true）
+  // 外部弹幕开关（从 localStorage 继承，默认全部关闭）
   const [externalDanmuEnabled, setExternalDanmuEnabled] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
       const v = localStorage.getItem('enable_external_danmu');
       if (v !== null) return v === 'true';
     }
-    return true; // 默认开启外部弹幕
+    return false; // 默认关闭外部弹幕
   });
   const externalDanmuEnabledRef = useRef(externalDanmuEnabled);
   useEffect(() => {
@@ -494,31 +494,41 @@ function PlayPageClient() {
   const generateSearchVariants = (originalQuery: string): string[] => {
     const variants: string[] = [];
     const trimmed = originalQuery.trim();
-    
+
     // 1. 原始查询（最高优先级）
     variants.push(trimmed);
-    
+
+    // 2. 处理中文标点符号变体
+    const chinesePunctuationVariants = generateChinesePunctuationVariants(trimmed);
+    chinesePunctuationVariants.forEach(variant => {
+      if (!variants.includes(variant)) {
+        variants.push(variant);
+      }
+    });
+
+    // 3. 移除数字变体处理（优化性能，依赖downstream相关性评分处理数字差异）
+
     // 如果包含空格，生成额外变体
     if (trimmed.includes(' ')) {
-      // 2. 去除所有空格
+      // 4. 去除所有空格
       const noSpaces = trimmed.replace(/\s+/g, '');
       if (noSpaces !== trimmed) {
         variants.push(noSpaces);
       }
-      
-      // 3. 标准化空格（多个空格合并为一个）
+
+      // 5. 标准化空格（多个空格合并为一个）
       const normalizedSpaces = trimmed.replace(/\s+/g, ' ');
       if (normalizedSpaces !== trimmed && !variants.includes(normalizedSpaces)) {
         variants.push(normalizedSpaces);
       }
-      
-      // 4. 提取关键词组合（针对"中餐厅 第九季"这种情况）
+
+      // 6. 提取关键词组合（针对"中餐厅 第九季"这种情况）
       const keywords = trimmed.split(/\s+/);
       if (keywords.length >= 2) {
         // 主要关键词 + 季/集等后缀
         const mainKeyword = keywords[0];
         const lastKeyword = keywords[keywords.length - 1];
-        
+
         // 如果最后一个词包含"第"、"季"、"集"等，尝试组合
         if (/第|季|集|部|篇|章/.test(lastKeyword)) {
           const combined = mainKeyword + lastKeyword;
@@ -526,16 +536,115 @@ function PlayPageClient() {
             variants.push(combined);
           }
         }
-        
-        // 仅使用主关键词搜索
-        if (!variants.includes(mainKeyword)) {
+
+        // 7. 空格变冒号的变体（重要！针对"死神来了 血脉诅咒" -> "死神来了：血脉诅咒"）
+        const withColon = trimmed.replace(/\s+/g, '：');
+        if (!variants.includes(withColon)) {
+          variants.push(withColon);
+        }
+
+        // 8. 空格变英文冒号的变体
+        const withEnglishColon = trimmed.replace(/\s+/g, ':');
+        if (!variants.includes(withEnglishColon)) {
+          variants.push(withEnglishColon);
+        }
+
+        // 仅使用主关键词搜索（过滤无意义的词）
+        const meaninglessWords = ['the', 'a', 'an', 'and', 'or', 'of', 'in', 'on', 'at', 'to', 'for', 'with', 'by'];
+        if (!variants.includes(mainKeyword) &&
+            !meaninglessWords.includes(mainKeyword.toLowerCase()) &&
+            mainKeyword.length > 2) {
           variants.push(mainKeyword);
         }
       }
     }
-    
+
     // 去重并返回
     return Array.from(new Set(variants));
+  };
+
+  // 移除数字变体生成函数（优化性能，依赖相关性评分处理）
+
+  /**
+   * 生成中文标点符号的搜索变体
+   * @param query 原始查询
+   * @returns 标点符号变体数组
+   */
+  const generateChinesePunctuationVariants = (query: string): string[] => {
+    const variants: string[] = [];
+
+    // 检查是否包含中文标点符号
+    const chinesePunctuation = /[：；，。！？、""''（）【】《》]/;
+    if (!chinesePunctuation.test(query)) {
+      return variants;
+    }
+
+    // 中文冒号变体 (针对"死神来了：血脉诅咒"这种情况)
+    if (query.includes('：')) {
+      // 优先级1: 替换为空格 (最可能匹配，如"死神来了 血脉诅咒" 能匹配到 "死神来了6：血脉诅咒")
+      const withSpace = query.replace(/：/g, ' ');
+      variants.push(withSpace);
+
+      // 优先级2: 完全去除冒号
+      const noColon = query.replace(/：/g, '');
+      variants.push(noColon);
+
+      // 优先级3: 替换为英文冒号
+      const englishColon = query.replace(/：/g, ':');
+      variants.push(englishColon);
+
+      // 优先级4: 提取冒号前的主标题 (降低优先级，避免匹配到错误的系列)
+      const beforeColon = query.split('：')[0].trim();
+      if (beforeColon && beforeColon !== query) {
+        variants.push(beforeColon);
+      }
+
+      // 优先级5: 提取冒号后的副标题
+      const afterColon = query.split('：')[1]?.trim();
+      if (afterColon) {
+        variants.push(afterColon);
+      }
+    }
+
+    // 其他中文标点符号处理
+    let cleanedQuery = query;
+
+    // 替换中文标点为对应英文标点
+    cleanedQuery = cleanedQuery.replace(/；/g, ';');
+    cleanedQuery = cleanedQuery.replace(/，/g, ',');
+    cleanedQuery = cleanedQuery.replace(/。/g, '.');
+    cleanedQuery = cleanedQuery.replace(/！/g, '!');
+    cleanedQuery = cleanedQuery.replace(/？/g, '?');
+    cleanedQuery = cleanedQuery.replace(/"/g, '"');
+    cleanedQuery = cleanedQuery.replace(/"/g, '"');
+    cleanedQuery = cleanedQuery.replace(/'/g, "'");
+    cleanedQuery = cleanedQuery.replace(/'/g, "'");
+    cleanedQuery = cleanedQuery.replace(/（/g, '(');
+    cleanedQuery = cleanedQuery.replace(/）/g, ')');
+    cleanedQuery = cleanedQuery.replace(/【/g, '[');
+    cleanedQuery = cleanedQuery.replace(/】/g, ']');
+    cleanedQuery = cleanedQuery.replace(/《/g, '<');
+    cleanedQuery = cleanedQuery.replace(/》/g, '>');
+
+    if (cleanedQuery !== query) {
+      variants.push(cleanedQuery);
+    }
+
+    // 完全去除所有标点符号
+    const noPunctuation = query.replace(/[：；，。！？、""''（）【】《》:;,.!?"'()[\]<>]/g, '');
+    if (noPunctuation !== query && noPunctuation.trim()) {
+      variants.push(noPunctuation);
+    }
+
+    return variants;
+  };
+
+  // 检查是否包含查询中的所有关键词（与downstream评分逻辑保持一致）
+  const checkAllKeywordsMatch = (queryTitle: string, resultTitle: string): boolean => {
+    const queryWords = queryTitle.replace(/[^\w\s\u4e00-\u9fff]/g, '').split(/\s+/).filter(w => w.length > 0);
+
+    // 检查结果标题是否包含查询中的所有关键词
+    return queryWords.every(word => resultTitle.includes(word));
   };
 
   // 网盘搜索函数
@@ -1573,10 +1682,10 @@ function PlayPageClient() {
         const allResults: SearchResult[] = [];
         let bestResults: SearchResult[] = [];
         
-        // 依次尝试每个搜索变体
+        // 依次尝试每个搜索变体，采用早期退出策略
         for (const variant of searchVariants) {
           console.log('尝试搜索变体:', variant);
-          
+
           const response = await fetch(
             `/api/search?q=${encodeURIComponent(variant)}`
           );
@@ -1585,15 +1694,26 @@ function PlayPageClient() {
             continue;
           }
           const data = await response.json();
-          
+
           if (data.results && data.results.length > 0) {
             allResults.push(...data.results);
-            
-            // 处理搜索结果，根据规则过滤
+
+            // 移除早期退出策略，让downstream的相关性评分发挥作用
+
+            // 处理搜索结果，使用智能模糊匹配（与downstream评分逻辑保持一致）
             const filteredResults = data.results.filter(
               (result: SearchResult) => {
-                const titleMatch = result.title.replaceAll(' ', '').toLowerCase() ===
-                  videoTitleRef.current.replaceAll(' ', '').toLowerCase();
+                const queryTitle = videoTitleRef.current.replaceAll(' ', '').toLowerCase();
+                const resultTitle = result.title.replaceAll(' ', '').toLowerCase();
+
+                // 智能标题匹配：支持数字变体和标点符号变化
+                const titleMatch = resultTitle.includes(queryTitle) ||
+                  queryTitle.includes(resultTitle) ||
+                  // 移除数字和标点后匹配（针对"死神来了：血脉诅咒" vs "死神来了6：血脉诅咒"）
+                  resultTitle.replace(/\d+|[：:]/g, '') === queryTitle.replace(/\d+|[：:]/g, '') ||
+                  // 通用关键词匹配：检查是否包含查询中的所有关键词
+                  checkAllKeywordsMatch(queryTitle, resultTitle);
+
                 const yearMatch = videoYearRef.current
                   ? result.year.toLowerCase() === videoYearRef.current.toLowerCase()
                   : true;
@@ -1601,25 +1721,105 @@ function PlayPageClient() {
                   ? (searchType === 'tv' && result.episodes.length > 1) ||
                     (searchType === 'movie' && result.episodes.length === 1)
                   : true;
-                
+
                 return titleMatch && yearMatch && typeMatch;
               }
             );
-            
+
             if (filteredResults.length > 0) {
-              console.log(`变体 "${variant}" 找到 ${filteredResults.length} 个匹配结果`);
+              console.log(`变体 "${variant}" 找到 ${filteredResults.length} 个精确匹配结果`);
               bestResults = filteredResults;
               break; // 找到精确匹配就停止
             }
           }
         }
         
-        // 如果没有精确匹配，返回所有结果让用户选择
-        const finalResults = bestResults.length > 0 ? bestResults : 
-          // 去重所有结果
-          Array.from(
-            new Map(allResults.map(item => [`${item.source}-${item.id}`, item])).values()
-          );
+        // 智能匹配：英文标题严格匹配，中文标题宽松匹配
+        let finalResults = bestResults;
+
+        // 如果没有精确匹配，根据语言类型进行不同策略的匹配
+        if (bestResults.length === 0) {
+          const queryTitle = videoTitleRef.current.toLowerCase().trim();
+          const allCandidates = allResults;
+
+          // 检测查询主要语言（英文 vs 中文）
+          const englishChars = (queryTitle.match(/[a-z\s]/g) || []).length;
+          const chineseChars = (queryTitle.match(/[\u4e00-\u9fff]/g) || []).length;
+          const isEnglishQuery = englishChars > chineseChars;
+
+          console.log(`搜索语言检测: ${isEnglishQuery ? '英文' : '中文'} - "${queryTitle}"`);
+
+          let relevantMatches;
+
+          if (isEnglishQuery) {
+            // 英文查询：使用词汇匹配策略，避免不相关结果
+            console.log('使用英文词汇匹配策略');
+
+            // 提取有效英文词汇（过滤停用词）
+            const queryWords = queryTitle.toLowerCase()
+              .replace(/[^\w\s]/g, ' ')
+              .split(/\s+/)
+              .filter(word => word.length > 2 && !['the', 'a', 'an', 'and', 'or', 'of', 'in', 'on', 'at', 'to', 'for', 'with', 'by'].includes(word));
+
+            console.log('英文关键词:', queryWords);
+
+            relevantMatches = allCandidates.filter(result => {
+              const title = result.title.toLowerCase();
+              const titleWords = title.replace(/[^\w\s]/g, ' ').split(/\s+/).filter(word => word.length > 1);
+
+              // 计算词汇匹配度：标题必须包含至少50%的查询关键词
+              const matchedWords = queryWords.filter(queryWord =>
+                titleWords.some(titleWord =>
+                  titleWord.includes(queryWord) || queryWord.includes(titleWord) ||
+                  // 允许部分相似（如gumball vs gum）
+                  (queryWord.length > 4 && titleWord.length > 4 &&
+                   queryWord.substring(0, 4) === titleWord.substring(0, 4))
+                )
+              );
+
+              const wordMatchRatio = matchedWords.length / queryWords.length;
+              if (wordMatchRatio >= 0.5) {
+                console.log(`英文词汇匹配 (${matchedWords.length}/${queryWords.length}): "${result.title}" - 匹配词: [${matchedWords.join(', ')}]`);
+                return true;
+              }
+              return false;
+            });
+          } else {
+            // 中文查询：宽松匹配，保持现有行为
+            console.log('使用中文宽松匹配策略');
+            relevantMatches = allCandidates.filter(result => {
+              const title = result.title.toLowerCase();
+              const normalizedQuery = queryTitle.replace(/[^\w\u4e00-\u9fff]/g, '');
+              const normalizedTitle = title.replace(/[^\w\u4e00-\u9fff]/g, '');
+
+              // 包含匹配或50%相似度
+              if (normalizedTitle.includes(normalizedQuery) || normalizedQuery.includes(normalizedTitle)) {
+                console.log(`中文包含匹配: "${result.title}"`);
+                return true;
+              }
+
+              const commonChars = Array.from(normalizedQuery).filter(char => normalizedTitle.includes(char)).length;
+              const similarity = commonChars / normalizedQuery.length;
+              if (similarity >= 0.5) {
+                console.log(`中文相似匹配 (${(similarity*100).toFixed(1)}%): "${result.title}"`);
+                return true;
+              }
+              return false;
+            });
+          }
+
+          console.log(`匹配结果: ${relevantMatches.length}/${allCandidates.length}`);
+
+          const maxResults = isEnglishQuery ? 5 : 20; // 英文更严格控制结果数
+          if (relevantMatches.length > 0 && relevantMatches.length <= maxResults) {
+            finalResults = Array.from(
+              new Map(relevantMatches.map(item => [`${item.source}-${item.id}`, item])).values()
+            );
+          } else {
+            console.log('没有找到合理的匹配，返回空结果');
+            finalResults = [];
+          }
+        }
           
         console.log(`智能搜索完成，最终返回 ${finalResults.length} 个结果`);
         setAvailableSources(finalResults);
@@ -2606,6 +2806,32 @@ function PlayPageClient() {
 
             hls.on(Hls.Events.ERROR, function (event: any, data: any) {
               console.error('HLS Error:', event, data);
+
+              // v1.6.13 增强：处理片段解析错误（针对initPTS修复）
+              if (data.details === Hls.ErrorDetails.FRAG_PARSING_ERROR) {
+                console.log('片段解析错误，尝试重新加载...');
+                // 重新开始加载，利用v1.6.13的initPTS修复
+                hls.startLoad();
+                return;
+              }
+
+              // v1.6.13 增强：处理时间戳相关错误（直播回搜修复）
+              if (data.details === Hls.ErrorDetails.BUFFER_APPEND_ERROR &&
+                  data.err && data.err.message &&
+                  data.err.message.includes('timestamp')) {
+                console.log('时间戳错误，清理缓冲区并重新加载...');
+                try {
+                  // 清理缓冲区后重新开始，利用v1.6.13的时间戳包装修复
+                  const currentTime = video.currentTime;
+                  hls.trigger(Hls.Events.BUFFER_RESET, undefined);
+                  hls.startLoad(currentTime);
+                } catch (e) {
+                  console.warn('缓冲区重置失败:', e);
+                  hls.startLoad();
+                }
+                return;
+              }
+
               if (data.fatal) {
                 switch (data.type) {
                   case Hls.ErrorTypes.NETWORK_ERROR:
@@ -2990,18 +3216,19 @@ function PlayPageClient() {
         // 添加弹幕插件按钮选择性隐藏CSS
         const optimizeDanmukuControlsCSS = () => {
           if (document.getElementById('danmuku-controls-optimize')) return;
-          
+
           const style = document.createElement('style');
           style.id = 'danmuku-controls-optimize';
           style.textContent = `
-            /* 只显示弹幕配置按钮，隐藏开关按钮和发射器 */
+            /* 隐藏弹幕开关按钮和发射器 */
             .artplayer-plugin-danmuku .apd-toggle {
               display: none !important;
             }
-            
+
             .artplayer-plugin-danmuku .apd-emitter {
               display: none !important;
             }
+
             
             /* 弹幕配置面板优化 - 修复全屏模式下点击问题 */
             .artplayer-plugin-danmuku .apd-config {
@@ -3067,21 +3294,7 @@ function PlayPageClient() {
                   pointer-events: auto !important;
                 }
 
-                /* 恢复ArtPlayer原生的hover显示机制 */
-                .artplayer-plugin-danmuku .apd-config:hover .apd-config-panel,
-                .artplayer-plugin-danmuku .apd-style:hover .apd-style-panel {
-                  opacity: 1 !important;
-                  pointer-events: auto !important;
-                  visibility: visible !important;
-                }
-
-                /* 仅在实际拖拽进度条时才禁用弹幕hover */
-                .artplayer[data-dragging="true"] .artplayer-plugin-danmuku .apd-config:hover .apd-config-panel,
-                .artplayer[data-dragging="true"] .artplayer-plugin-danmuku .apd-style:hover .apd-style-panel {
-                  opacity: 0 !important;
-                  pointer-events: none !important;
-                  visibility: hidden !important;
-                }
+                /* 简化：依赖全局CSS中的hover处理 */
 
                 /* 确保进度条层级足够高，避免被弹幕面板遮挡 */
                 .art-progress {
@@ -3210,17 +3423,23 @@ function PlayPageClient() {
         // 移动端弹幕配置按钮点击切换支持 - 基于ArtPlayer设置按钮原理
         const addMobileDanmakuToggle = () => {
           const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-          
+
           setTimeout(() => {
             const configButton = document.querySelector('.artplayer-plugin-danmuku .apd-config');
             const configPanel = document.querySelector('.artplayer-plugin-danmuku .apd-config-panel');
-            
+
             if (!configButton || !configPanel) {
               console.warn('弹幕配置按钮或面板未找到');
               return;
             }
-            
+
             console.log('设备类型:', isMobile ? '移动端' : '桌面端');
+
+            // 桌面端：简化处理，依赖CSS hover，移除复杂的JavaScript事件
+            if (!isMobile) {
+              console.log('桌面端：使用CSS原生hover，避免JavaScript事件冲突');
+              return;
+            }
             
             if (isMobile) {
               // 移动端：添加点击切换支持 + 持久位置修正
@@ -3305,77 +3524,6 @@ function PlayPageClient() {
               });
 
               console.log('移动端弹幕配置切换功能已激活');
-            } else {
-              // 桌面端：使用hover延迟交互，与移动端保持一致
-              console.log('为桌面端添加弹幕配置按钮hover延迟交互功能');
-
-              let isConfigVisible = false;
-              let showTimer: NodeJS.Timeout | null = null;
-              let hideTimer: NodeJS.Timeout | null = null;
-
-              const showPanel = () => {
-                if (hideTimer) {
-                  clearTimeout(hideTimer);
-                  hideTimer = null;
-                }
-
-                if (!isConfigVisible) {
-                  isConfigVisible = true;
-                  (configPanel as HTMLElement).style.setProperty('display', 'block', 'important');
-                  // 添加show类来触发动画
-                  setTimeout(() => {
-                    (configPanel as HTMLElement).classList.add('show');
-                  }, 10);
-                  console.log('桌面端弹幕配置面板：显示');
-                }
-              };
-
-              const hidePanel = () => {
-                if (showTimer) {
-                  clearTimeout(showTimer);
-                  showTimer = null;
-                }
-
-                if (isConfigVisible) {
-                  isConfigVisible = false;
-                  (configPanel as HTMLElement).classList.remove('show');
-                  // 等待动画完成后隐藏
-                  setTimeout(() => {
-                    (configPanel as HTMLElement).style.setProperty('display', 'none', 'important');
-                  }, 200);
-                  console.log('桌面端弹幕配置面板：隐藏');
-                }
-              };
-
-              // 鼠标进入按钮或面板区域
-              const handleMouseEnter = () => {
-                if (hideTimer) {
-                  clearTimeout(hideTimer);
-                  hideTimer = null;
-                }
-
-                showTimer = setTimeout(showPanel, 300); // 300ms延迟显示
-              };
-
-              // 鼠标离开按钮或面板区域
-              const handleMouseLeave = () => {
-                if (showTimer) {
-                  clearTimeout(showTimer);
-                  showTimer = null;
-                }
-
-                hideTimer = setTimeout(hidePanel, 500); // 500ms延迟隐藏
-              };
-
-              // 为按钮添加hover事件
-              configButton.addEventListener('mouseenter', handleMouseEnter);
-              configButton.addEventListener('mouseleave', handleMouseLeave);
-
-              // 为面板添加hover事件
-              configPanel.addEventListener('mouseenter', handleMouseEnter);
-              configPanel.addEventListener('mouseleave', handleMouseLeave);
-
-              console.log('桌面端弹幕配置hover延迟交互功能已激活');
             }
           }, 2000); // 延迟2秒确保弹幕插件完全初始化
         };
